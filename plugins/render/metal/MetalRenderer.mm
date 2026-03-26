@@ -2,6 +2,7 @@
 
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <TargetConditionals.h>
 #import <simd/simd.h>
 
 #include "asset/ImageAsset.h"
@@ -292,7 +293,7 @@ struct MetalRendererImpl {
         pd.vertexFunction = vert;
         pd.fragmentFunction = frag;
         pd.vertexDescriptor = vd;
-        pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
         pd.colorAttachments[0].blendingEnabled = YES;
         pd.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
         pd.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
@@ -321,7 +322,7 @@ struct MetalRendererImpl {
         MTLRenderPipelineDescriptor *pd = [[MTLRenderPipelineDescriptor alloc] init];
         pd.vertexFunction = [lib newFunctionWithName:@"blit_vertex"];
         pd.fragmentFunction = [lib newFunctionWithName:@"blit_fragment"];
-        pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
 
         blit_pipeline = [device newRenderPipelineStateWithDescriptor:pd error:&err];
         if (!blit_pipeline) {
@@ -355,7 +356,7 @@ struct MetalRendererImpl {
         pd.vertexFunction = [lib newFunctionWithName:@"wf_vertex"];
         pd.fragmentFunction = [lib newFunctionWithName:@"wf_fragment"];
         pd.vertexDescriptor = vd;
-        pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
         pd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
 
         wireframe_pipeline = [device newRenderPipelineStateWithDescriptor:pd error:&err];
@@ -365,7 +366,7 @@ struct MetalRendererImpl {
         if (display_texture && display_width == w && display_height == h)
             return;
 
-        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
                                                                                       width:w
                                                                                      height:h
                                                                                   mipmapped:NO];
@@ -439,7 +440,7 @@ struct MetalRendererImpl {
     }
 
     void build_render_targets() {
-        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
                                                                                       width:fb_width
                                                                                      height:fb_height
                                                                                   mipmapped:NO];
@@ -470,6 +471,13 @@ struct MetalRendererImpl {
     /// so this works for both single-frame and multi-frame assets.
     /// Requires bytesPerRow aligned to device minimum.
     bool can_zero_copy(const std::shared_ptr<ImageAsset> &asset) const {
+#if TARGET_OS_SIMULATOR
+        // The iOS Simulator's Metal driver (MTLSimDriver) does not support
+        // newBufferWithBytesNoCopy — it crashes with _xpc_api_misuse instead
+        // of returning nil. Always use the fallback copy path on simulator.
+        (void)asset;
+        return false;
+#else
         if (min_tex_align == 0)
             return false;
         // Never zero-copy mutable assets. The glyph atlas starts at generation 0
@@ -480,6 +488,7 @@ struct MetalRendererImpl {
             return false;
         NSUInteger bytes_per_row = (NSUInteger)asset->width() * 4;
         return (bytes_per_row % min_tex_align) == 0;
+#endif
     }
 
     /// Create a buffer-backed texture that shares the asset's pixel memory.
@@ -671,7 +680,7 @@ struct MetalRendererImpl {
         pd.vertexFunction = vert;
         pd.fragmentFunction = frag;
         pd.vertexDescriptor = vd;
-        pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
         pd.colorAttachments[0].blendingEnabled = YES;
         pd.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
         pd.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;

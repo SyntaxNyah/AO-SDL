@@ -43,6 +43,14 @@ static std::string ao_decode(const std::string& s) {
     return out;
 }
 
+static std::vector<std::string> ao_decode_list(const std::vector<std::string>& fields) {
+    std::vector<std::string> out;
+    out.reserve(fields.size());
+    for (const auto& f : fields)
+        out.push_back(ao_decode(f));
+    return out;
+}
+
 // ---------------------------------------------------------------------------
 // AOPacketDecryptor
 // ---------------------------------------------------------------------------
@@ -111,7 +119,7 @@ AOPacketPN::AOPacketPN(const std::vector<std::string>& fields) : AOPacket("PN", 
     if (fields.size() >= MIN_FIELDS) {
         current_players = std::stoi(fields[0]);
         max_players = std::stoi(fields[1]);
-        server_description = fields.size() > 2 ? fields[2] : "";
+        server_description = fields.size() > 2 ? ao_decode(fields[2]) : "";
     }
 }
 
@@ -161,7 +169,8 @@ AOPacketRC::AOPacketRC() : AOPacket("RC", {}) {
 
 PacketRegistrar AOPacketSC::registrar("SC", [](const auto& f) { return std::make_unique<AOPacketSC>(f); });
 
-AOPacketSC::AOPacketSC(const std::vector<std::string>& fields) : AOPacket("SC", fields), character_list(fields) {
+AOPacketSC::AOPacketSC(const std::vector<std::string>& fields)
+    : AOPacket("SC", fields), character_list(ao_decode_list(fields)) {
 }
 
 // ---------------------------------------------------------------------------
@@ -177,7 +186,8 @@ AOPacketRM::AOPacketRM() : AOPacket("RM", {}) {
 
 PacketRegistrar AOPacketSM::registrar("SM", [](const auto& f) { return std::make_unique<AOPacketSM>(f); });
 
-AOPacketSM::AOPacketSM(const std::vector<std::string>& fields) : AOPacket("SM", fields), music_list(fields) {
+AOPacketSM::AOPacketSM(const std::vector<std::string>& fields)
+    : AOPacket("SM", fields), music_list(ao_decode_list(fields)) {
 }
 
 // ---------------------------------------------------------------------------
@@ -262,7 +272,9 @@ AOPacketMS::AOPacketMS(const ICMessageData& d)
            ao_encode(d.showname), std::to_string(d.other_charid), ao_encode(d.self_offset), std::to_string(d.immediate),
            // 19-25: 2.8 extensions
            std::to_string(d.looping_sfx), std::to_string(d.screenshake), ao_encode(d.frame_screenshake),
-           ao_encode(d.frame_realization), ao_encode(d.frame_sfx), std::to_string(d.additive), ao_encode(d.effects)}) {
+           ao_encode(d.frame_realization), ao_encode(d.frame_sfx), std::to_string(d.additive), ao_encode(d.effects),
+           // 26-27: blipname + slide (client→server only; pair fields are server-added)
+           ao_encode(d.blipname), d.slide}) {
 }
 
 AOPacketMS::AOPacketMS(const std::vector<std::string>& fields) : AOPacket("MS", fields) {
@@ -305,6 +317,9 @@ AOPacketMS::AOPacketMS(const std::vector<std::string>& fields) : AOPacket("MS", 
             frame_sfx = ao_decode(fields[27]);
         if (fields.size() > 28)
             additive = fields[28] == "1";
+        // fields[29] = effects, fields[30] = blipname (not yet used)
+        if (fields.size() > 31)
+            slide = fields[31] == "1";
 
         // Legacy emote_mod remapping
         if (emote_mod == 4)
@@ -353,7 +368,8 @@ PacketRegistrar AOPacketARUP::registrar("ARUP", [](const auto& f) { return std::
 AOPacketARUP::AOPacketARUP(const std::vector<std::string>& fields) : AOPacket("ARUP", fields) {
     if (fields.size() >= MIN_FIELDS) {
         arup_type = std::stoi(fields[0]);
-        values.assign(fields.begin() + 1, fields.end());
+        for (auto it = fields.begin() + 1; it != fields.end(); ++it)
+            values.push_back(ao_decode(*it));
     }
 }
 
@@ -365,8 +381,8 @@ PacketRegistrar AOPacketBN::registrar("BN", [](const auto& f) { return std::make
 
 AOPacketBN::AOPacketBN(const std::vector<std::string>& fields) : AOPacket("BN", fields) {
     if (fields.size() >= MIN_FIELDS) {
-        background = fields[0];
-        position = fields.size() >= 2 ? fields[1] : "";
+        background = ao_decode(fields[0]);
+        position = fields.size() >= 2 ? ao_decode(fields[1]) : "";
     }
 }
 
@@ -397,7 +413,7 @@ AOPacketFL::AOPacketFL(const std::vector<std::string>& fields) : AOPacket("FL", 
 
 PacketRegistrar AOPacketFA::registrar("FA", [](const auto& f) { return std::make_unique<AOPacketFA>(f); });
 
-AOPacketFA::AOPacketFA(const std::vector<std::string>& fields) : AOPacket("FA", fields), areas(fields) {
+AOPacketFA::AOPacketFA(const std::vector<std::string>& fields) : AOPacket("FA", fields), areas(ao_decode_list(fields)) {
 }
 
 // ---------------------------------------------------------------------------
@@ -406,7 +422,8 @@ AOPacketFA::AOPacketFA(const std::vector<std::string>& fields) : AOPacket("FA", 
 
 PacketRegistrar AOPacketFM::registrar("FM", [](const auto& f) { return std::make_unique<AOPacketFM>(f); });
 
-AOPacketFM::AOPacketFM(const std::vector<std::string>& fields) : AOPacket("FM", fields), tracks(fields) {
+AOPacketFM::AOPacketFM(const std::vector<std::string>& fields)
+    : AOPacket("FM", fields), tracks(ao_decode_list(fields)) {
 }
 
 // ---------------------------------------------------------------------------
@@ -443,7 +460,8 @@ AOPacketTI::AOPacketTI(const std::vector<std::string>& fields) : AOPacket("TI", 
 
 PacketRegistrar AOPacketLE::registrar("LE", [](const auto& f) { return std::make_unique<AOPacketLE>(f); });
 
-AOPacketLE::AOPacketLE(const std::vector<std::string>& fields) : AOPacket("LE", fields), raw_items(fields) {
+AOPacketLE::AOPacketLE(const std::vector<std::string>& fields)
+    : AOPacket("LE", fields), raw_items(ao_decode_list(fields)) {
 }
 
 // ---------------------------------------------------------------------------
@@ -469,7 +487,7 @@ AOPacketPU::AOPacketPU(const std::vector<std::string>& fields) : AOPacket("PU", 
     if (fields.size() >= MIN_FIELDS) {
         player_id = std::stoi(fields[0]);
         data_type = std::stoi(fields[1]);
-        data = fields[2];
+        data = ao_decode(fields[2]);
     }
 }
 

@@ -22,6 +22,10 @@ set(TEST_SOURCES
     ao/game/test_AOBackground.cpp
     ao/game/test_ICMessageQueue.cpp
     ao/game/test_SceneEffects.cpp
+    ao/game/test_SlideEffect.cpp
+    ao/game/test_AOMessagePlayer.cpp
+    ao/game/test_AOSceneCompositor.cpp
+    ao/game/test_AOCourtroomPresenter.cpp
     asset/test_AssetLibrary.cpp
     asset/test_AssetCache.cpp
     asset/test_ApngDecoder.cpp
@@ -34,6 +38,7 @@ set(TEST_SOURCES
     event/test_BackgroundEvent.cpp
     event/test_EventTypes.cpp
     game/test_ServerList.cpp
+    game/test_Session.cpp
     game/test_TickProfiler.cpp
     render/test_AnimationPlayer.cpp
     render/test_Layer.cpp
@@ -51,6 +56,8 @@ set(TEST_SOURCES
     audio/test_AudioStream.cpp
     ao/ui/test_Screens.cpp
     render/test_TextMeshBuilder.cpp
+    configuration/test_IConfiguration.cpp
+    configuration/test_JsonConfiguration.cpp
 )
 
 add_executable(aosdl_tests ${TEST_SOURCES})
