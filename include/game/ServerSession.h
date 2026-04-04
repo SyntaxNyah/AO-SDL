@@ -1,0 +1,73 @@
+/**
+ * @file ServerSession.h
+ * @brief Represents a player connected to the server.
+ *
+ * ServerSession holds the common state shared across protocol backends.
+ * Lifetime is managed by the backend: AO ties it to socket lifetime,
+ * NX ties it to a token that survives reconnects.
+ */
+#pragma once
+
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <string>
+
+struct ServerSession {
+    ServerSession() = default;
+    ServerSession(ServerSession&& o) noexcept
+        : client_id(o.client_id), session_id(o.session_id), session_token(std::move(o.session_token)),
+          display_name(std::move(o.display_name)), client_software(std::move(o.client_software)),
+          character_id(o.character_id), area(std::move(o.area)), joined(o.joined), moderator(o.moderator),
+          protocol(std::move(o.protocol)), last_activity_ns(o.last_activity_ns.load(std::memory_order_relaxed)),
+          bytes_sent(o.bytes_sent.load(std::memory_order_relaxed)),
+          bytes_received(o.bytes_received.load(std::memory_order_relaxed)),
+          packets_sent(o.packets_sent.load(std::memory_order_relaxed)),
+          packets_received(o.packets_received.load(std::memory_order_relaxed)),
+          mod_actions(o.mod_actions.load(std::memory_order_relaxed)) {
+    }
+    ServerSession& operator=(ServerSession&&) = delete;
+    ServerSession(const ServerSession&) = delete;
+    ServerSession& operator=(const ServerSession&) = delete;
+
+    uint64_t client_id = 0;    ///< WebSocket client ID (transport-level).
+    uint64_t session_id = 0;   ///< Unique server-assigned session ID.
+    std::string session_token; ///< Auth token (empty for AO legacy clients).
+
+    std::string display_name;    ///< Player display name / showname.
+    std::string client_software; ///< Client name (e.g. "AO-SDL", "AO2").
+    int character_id = -1;       ///< Selected character (-1 = none).
+    std::string area;            ///< Current area/room.
+
+    /// True if the session has completed the handshake and is fully joined.
+    bool joined = false;
+
+    /// True if the session has moderator privileges (e.g. all-areas broadcast).
+    bool moderator = false;
+
+    /// Protocol backend that owns this session ("ao2" or "aonx").
+    std::string protocol;
+
+    /// Last time this session was active (REST endpoint call, SSE heartbeat).
+    /// Used for TTL-based expiry of REST sessions. Stored as nanoseconds since
+    /// steady_clock epoch so it can be atomic — allows touch() under a shared
+    /// (reader) lock without exclusive access.
+    std::atomic<int64_t> last_activity_ns{std::chrono::steady_clock::now().time_since_epoch().count()};
+
+    void touch() {
+        last_activity_ns.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_relaxed);
+    }
+
+    /// Read last_activity as a time_point (convenience for TTL checks).
+    std::chrono::steady_clock::time_point last_activity() const {
+        return std::chrono::steady_clock::time_point{
+            std::chrono::steady_clock::duration{last_activity_ns.load(std::memory_order_relaxed)}};
+    }
+
+    // -- Per-session traffic counters (atomic, updated inline at I/O sites) ---
+    std::atomic<uint64_t> bytes_sent{0};
+    std::atomic<uint64_t> bytes_received{0};
+    std::atomic<uint64_t> packets_sent{0};
+    std::atomic<uint64_t> packets_received{0};
+    std::atomic<uint64_t> mod_actions{0};
+};

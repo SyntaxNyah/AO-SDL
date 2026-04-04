@@ -10,8 +10,12 @@ if(WIN32)
     add_compile_definitions(WIN32_LEAN_AND_MEAN NOMINMAX)
 endif()
 
-# LTO for Release builds (significantly reduces binary size)
-if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "MinSizeRel")
+# LTO for Release builds (significantly reduces binary size).
+# Disabled on MSVC: LTCG's global code generation merges TUs with conflicting
+# /Gs flags (SDL2 sets /Gs1048576 to avoid CRT deps).  The merged functions
+# lose __chkstk stack probes, causing stack overflow crashes on Windows threads
+# whose committed stack is smaller than the inlined frame.  See README.md.
+if(NOT MSVC AND (CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "MinSizeRel"))
     include(CheckIPOSupported)
     check_ipo_supported(RESULT IPO_SUPPORTED)
     if(IPO_SUPPORTED)
@@ -20,14 +24,62 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "MinSizeRel"
     endif()
 endif()
 
+# Dead code elimination for MinSizeRel builds.
+# -ffunction-sections/-fdata-sections put each symbol in its own section;
+# -Wl,-dead_strip (macOS) or -Wl,--gc-sections (Linux) discards unreferenced ones.
+if(CMAKE_BUILD_TYPE STREQUAL "MinSizeRel" AND NOT MSVC)
+    add_compile_options(-ffunction-sections -fdata-sections)
+    if(APPLE)
+        add_link_options(-Wl,-dead_strip)
+    else()
+        add_link_options(-Wl,--gc-sections)
+    endif()
+    message(STATUS "Dead code elimination enabled")
+endif()
+
+# Strip executables in MinSizeRel builds (post-link step).
+# Call aosdl_strip(target) on executable targets to add the post-build step.
+if(CMAKE_BUILD_TYPE STREQUAL "MinSizeRel" AND NOT MSVC)
+    find_program(STRIP_EXECUTABLE strip)
+    if(STRIP_EXECUTABLE)
+        function(aosdl_strip target)
+            # Linker map: per-target to avoid clobbering when multiple exes build
+            if(APPLE)
+                target_link_options(${target} PRIVATE "LINKER:-map,$<TARGET_FILE:${target}>.map")
+            else()
+                target_link_options(${target} PRIVATE "LINKER:-Map,$<TARGET_FILE:${target}>.map")
+            endif()
+            add_custom_command(TARGET ${target} POST_BUILD
+                COMMAND ${STRIP_EXECUTABLE} "$<TARGET_FILE:${target}>"
+                COMMENT "Stripping ${target}")
+        endfunction()
+        message(STATUS "Strip + linker map enabled (post-build)")
+    else()
+        function(aosdl_strip target)
+        endfunction()
+        message(WARNING "strip not found — binaries will not be stripped")
+    endif()
+else()
+    function(aosdl_strip target)
+    endfunction()
+endif()
+
+# CMP0069 NEW: honor INTERPROCEDURAL_OPTIMIZATION on all targets.
+# CMAKE_POLICY_DEFAULT propagates into subdirectories (unlike cmake_policy
+# which is scope-local), so bundled SDL2, freetype, etc. participate in LTO.
+set(CMAKE_POLICY_DEFAULT_CMP0069 NEW)
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# Server-only builds skip the SDL client, renderers, and their dependencies.
+option(AO_BUILD_SERVER_ONLY "Build only the Kagami server (no SDL client, renderer, or GUI)" OFF)
 
 # =============================================================================
 # Third-party dependencies
 # =============================================================================
 
 # --- SDL2 — only needed for the desktop SDL app, not for Flutter/mobile ------
-if(NOT AO_BUILD_FLUTTER)
+if(NOT AO_BUILD_FLUTTER AND NOT AO_BUILD_SERVER_ONLY)
     set(SDL_SHARED OFF CACHE BOOL "" FORCE)
     set(SDL_STATIC ON CACHE BOOL "" FORCE)
     set(SDL_JOYSTICK OFF CACHE BOOL "" FORCE)
@@ -115,8 +167,8 @@ target_include_directories(opusfile
 target_link_libraries(opusfile PUBLIC Ogg::ogg Opus::opus)
 target_compile_definitions(opusfile PRIVATE OP_DISABLE_HTTP)
 
-# ImGui (static lib — desktop only, not needed for Flutter)
-if(NOT AO_BUILD_FLUTTER)
+# ImGui (static lib — desktop only, not needed for Flutter or server)
+if(NOT AO_BUILD_FLUTTER AND NOT AO_BUILD_SERVER_ONLY)
     set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third-party/imgui)
     set(IMGUI_SOURCES
         ${IMGUI_DIR}/imgui.cpp
@@ -200,6 +252,58 @@ embed_assets(EMBEDDED_ASSETS_SRC
 )
 
 # =============================================================================
+# Schema generation from OpenAPI spec (optional, requires Python3 + PyYAML)
+# =============================================================================
+option(AOSDL_GENERATE_SCHEMAS "Generate JSON schema validators from openapi.yaml (requires Python3 + PyYAML)" ON)
+
+if(AOSDL_GENERATE_SCHEMAS AND NOT AO_BUILD_FLUTTER)
+    find_package(Python3 COMPONENTS Interpreter)
+    if(NOT Python3_FOUND)
+        message(FATAL_ERROR
+            "\n"
+            "  ╔══════════════════════════════════════════════════════════════╗\n"
+            "  ║  AOSDL_GENERATE_SCHEMAS=ON but Python3 was not found!      ║\n"
+            "  ║  Install Python 3 and PyYAML, or pass:                     ║\n"
+            "  ║    -DAOSDL_GENERATE_SCHEMAS=OFF                            ║\n"
+            "  ╚══════════════════════════════════════════════════════════════╝\n"
+        )
+    else()
+        # Verify PyYAML is available
+        execute_process(
+            COMMAND ${Python3_EXECUTABLE} -c "import yaml"
+            RESULT_VARIABLE _pyyaml_result
+            OUTPUT_QUIET ERROR_QUIET
+        )
+        if(NOT _pyyaml_result EQUAL 0)
+            message(FATAL_ERROR
+                "\n"
+                "  ╔══════════════════════════════════════════════════════════════╗\n"
+                "  ║  AOSDL_GENERATE_SCHEMAS=ON but PyYAML is not installed!    ║\n"
+                "  ║  Install with: pip install pyyaml                           ║\n"
+                "  ║  Or pass: -DAOSDL_GENERATE_SCHEMAS=OFF                     ║\n"
+                "  ╚══════════════════════════════════════════════════════════════╝\n"
+            )
+        else()
+            set(AONX_OPENAPI_SPEC "${CMAKE_SOURCE_DIR}/doc/aonx/openapi.yaml")
+            set(AONX_SCHEMAS_CPP "${CMAKE_BINARY_DIR}/generated/AonxSchemas.cpp")
+
+            add_custom_command(
+                OUTPUT  "${AONX_SCHEMAS_CPP}"
+                COMMAND ${Python3_EXECUTABLE}
+                        "${CMAKE_SOURCE_DIR}/scripts/generate_schemas.py"
+                        "${AONX_OPENAPI_SPEC}"
+                        "${AONX_SCHEMAS_CPP}"
+                DEPENDS "${AONX_OPENAPI_SPEC}"
+                        "${CMAKE_SOURCE_DIR}/scripts/generate_schemas.py"
+                COMMENT "Generating JSON schema validators from openapi.yaml"
+            )
+            set(AOSDL_SCHEMAS_AVAILABLE ON)
+            message(STATUS "Schema generation enabled (Python ${Python3_VERSION})")
+        endif()
+    endif()
+endif()
+
+# =============================================================================
 # aoengine — core engine library (no GL, no SDL)
 #
 # Public include root: engine/
@@ -208,6 +312,36 @@ embed_assets(EMBEDDED_ASSETS_SRC
 #   #include "render/IRenderer.h"    — render backend interface
 #   #include "ui/IUIRenderer.h"      — UI backend interface
 # =============================================================================
+
+# --- nghttp2 — HTTP/2 C library (static, lib sources only) -------------------
+# Generate nghttp2ver.h from template (not committed in the nghttp2 repo).
+set(PACKAGE_VERSION "1.68.90")
+set(PACKAGE_VERSION_NUM 0x01445a)
+configure_file(
+    third-party/nghttp2/lib/includes/nghttp2/nghttp2ver.h.in
+    ${CMAKE_CURRENT_BINARY_DIR}/nghttp2/nghttp2/nghttp2ver.h
+    @ONLY
+)
+file(GLOB NGHTTP2_SOURCES third-party/nghttp2/lib/*.c)
+add_library(nghttp2 STATIC ${NGHTTP2_SOURCES})
+set_property(TARGET nghttp2 PROPERTY C_STANDARD 11)
+target_include_directories(nghttp2
+    PUBLIC  third-party/nghttp2/lib/includes
+    PUBLIC  ${CMAKE_CURRENT_BINARY_DIR}/nghttp2  # for generated nghttp2ver.h
+    PRIVATE third-party/nghttp2/lib
+)
+target_compile_definitions(nghttp2
+    PRIVATE BUILDING_NGHTTP2
+    PUBLIC  NGHTTP2_STATICLIB    # suppress __declspec(dllimport) in nghttp2.h for static linking
+            NGHTTP2_NO_SSIZE_T  # consumers use *2 APIs (nghttp2_ssize, not ssize_t)
+)
+# MSVC lacks POSIX ssize_t — nghttp2's deprecated wrappers need it internally.
+# BUILDING_NGHTTP2 undefines NGHTTP2_NO_SSIZE_T inside the library, exposing
+# the ssize_t typedefs. Defining ssize_t as ptrdiff_t is the nghttp2-recommended
+# approach (see nghttp2's CMakeLists.txt check_type_size block).
+if(MSVC)
+    target_compile_definitions(nghttp2 PRIVATE "ssize_t=ptrdiff_t")
+endif()
 
 add_library(aoengine STATIC
     engine/event/Event.cpp
@@ -223,8 +357,11 @@ add_library(aoengine STATIC
 
     engine/utils/Log.cpp
     engine/utils/Base64.cpp
+    engine/utils/JsonSchema.cpp
     engine/utils/JsonValidation.cpp
+    engine/utils/StringHelpers.cpp
 
+    engine/game/GameRoom.cpp
     engine/game/GameThread.cpp
     engine/game/ServerList.cpp
     engine/game/Session.cpp
@@ -241,9 +378,16 @@ add_library(aoengine STATIC
     engine/asset/stb_image_impl.cpp
 
     engine/net/WebSocket.cpp
-    engine/net/KissnetTcpSocket.cpp
-    engine/net/NetworkThread.cpp
+    engine/net/WebSocketFrame.cpp
+    engine/net/WebSocketCommon.cpp
+    engine/net/WebSocketServer.cpp
+    engine/net/Http.cpp
+    engine/net/HttpServer.cpp
+    engine/net/PlatformTcpSocket.cpp
+    engine/net/PlatformServerSocket.cpp
+    engine/net/WSClientThread.cpp
 
+    engine/event/ICMessageEvent.cpp
     engine/event/OutgoingICMessageEvent.cpp
     engine/event/DisconnectEvent.cpp
     engine/ui/UIManager.cpp
@@ -259,6 +403,9 @@ add_library(aoengine STATIC
     engine/render/GlyphCache.cpp
     engine/render/TextMeshBuilder.cpp
     engine/net/HttpPool.cpp
+    engine/net/Http2Connection.cpp
+    engine/net/EndpointFactory.cpp
+    engine/net/RestRouter.cpp
     engine/asset/MountHttp.cpp
     engine/asset/ImageDecoders.cpp
     engine/asset/formats/WebPDecoder.cpp
@@ -278,18 +425,24 @@ if(APPLE)
         platform/macos/SystemFonts.mm
         platform/macos/HardwareId.mm
         platform/macos/Time.cpp
+        platform/macos/Socket.mm
+        platform/macos/Poll.cpp
     )
 elseif(WIN32)
     target_sources(aoengine PRIVATE
         platform/windows/SystemFonts.cpp
         platform/windows/HardwareId.cpp
         platform/windows/Time.cpp
+        platform/windows/Socket.cpp
+        platform/windows/Poll.cpp
     )
 else()
     target_sources(aoengine PRIVATE
         platform/linux/SystemFonts.cpp
         platform/linux/HardwareId.cpp
         platform/linux/Time.cpp
+        platform/linux/Socket.cpp
+        platform/linux/Poll.cpp
     )
 endif()
 
@@ -301,36 +454,17 @@ target_include_directories(aoengine
             third-party/header-libs
     PRIVATE engine
             third-party/stb
-            third-party/kissnet
             third-party/bit7z
 )
 
-# HTTPS support: OpenSSL on desktop, native Apple TLS on iOS via apple_httplib shim
-if(AO_BUILD_FLUTTER AND APPLE)
-    # Use our NSURLSession-based httplib replacement instead of cpp-httplib+OpenSSL.
-    # The shim header (apple_httplib.h renamed to httplib.h) must shadow the real one.
-    # We achieve this by creating a shim directory with a symlink.
-    set(HTTPLIB_SHIM_DIR "${CMAKE_BINARY_DIR}/httplib_shim")
-    file(MAKE_DIRECTORY "${HTTPLIB_SHIM_DIR}")
-    file(CREATE_LINK
-        "${CMAKE_SOURCE_DIR}/apps/flutter/native/apple_httplib.h"
-        "${HTTPLIB_SHIM_DIR}/httplib.h"
-        SYMBOLIC)
-    # Put the shim dir BEFORE third-party/header-libs so it shadows the real httplib.h
-    target_include_directories(aoengine BEFORE PUBLIC "${HTTPLIB_SHIM_DIR}")
-    # Compile the NSURLSession implementation (requires ARC for ObjC memory management)
-    target_sources(aoengine PRIVATE apps/flutter/native/apple_httplib.mm)
-    set_source_files_properties(apps/flutter/native/apple_httplib.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
-    target_link_libraries(aoengine PUBLIC bit7z freetype webpdemux webp opusfile)
+# TLS support: Secure Transport on Apple, OpenSSL on Linux/Windows
+if(APPLE)
+    target_link_libraries(aoengine PUBLIC bit7z freetype webpdemux webp opusfile nghttp2)
+    set_source_files_properties(platform/macos/Socket.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 else()
     set(OPENSSL_USE_STATIC_LIBS ON)
-    find_package(OpenSSL)
-    if(OPENSSL_FOUND)
-        target_compile_definitions(aoengine PUBLIC CPPHTTPLIB_OPENSSL_SUPPORT)
-        target_link_libraries(aoengine PUBLIC bit7z freetype webpdemux webp opusfile OpenSSL::SSL OpenSSL::Crypto)
-    else()
-        target_link_libraries(aoengine PUBLIC bit7z freetype webpdemux webp opusfile)
-    endif()
+    find_package(OpenSSL REQUIRED)
+    target_link_libraries(aoengine PUBLIC bit7z freetype webpdemux webp opusfile nghttp2 OpenSSL::SSL OpenSSL::Crypto)
 endif()
 target_include_directories(aoengine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third-party/libwebp/src)
 
@@ -339,6 +473,8 @@ if(APPLE)
         "-framework CoreText"
         "-framework Foundation"
         "-framework IOKit"
+        "-framework Network"
+        "-framework Security"
     )
 endif()
 
@@ -346,6 +482,7 @@ endif()
 # Plugins
 # =============================================================================
 
+if(NOT AO_BUILD_SERVER_ONLY)
 if(APPLE)
     # --- aorender_metal — Metal renderer backend (macOS / iOS) ----------------
 
@@ -396,14 +533,17 @@ else()
         target_link_libraries(aorender_gl PUBLIC ${GLEW_LIBRARIES})
     endif()
 endif()
+endif() # NOT AO_BUILD_SERVER_ONLY
 
 # --- ao_net — AO2 network protocol (packet parsing, serialization) -----------
 
 add_library(ao_net STATIC
     plugins/net/ao/AOClient.cpp
+    plugins/net/ao/AOServer.cpp
     plugins/net/ao/AOPacket.cpp
     plugins/net/ao/PacketTypes.cpp
     plugins/net/ao/PacketBehavior.cpp
+    plugins/net/ao/ServerPacketBehavior.cpp
 )
 set_property(TARGET ao_net PROPERTY CXX_STANDARD 20)
 target_include_directories(ao_net
@@ -412,10 +552,51 @@ target_include_directories(ao_net
 )
 target_link_libraries(ao_net PUBLIC aoengine)
 
+# --- nx_net — AONX network protocol (JSON messages, REST+WebSocket) ---------
+
+add_library(nx_net STATIC
+    plugins/net/nx/NXMessage.cpp
+    plugins/net/nx/NXServer.cpp
+    plugins/net/nx/NXEndpoint.cpp
+    plugins/net/nx/endpoints/ServerEndpoint.cpp
+    plugins/net/nx/endpoints/SessionCreateEndpoint.cpp
+    plugins/net/nx/endpoints/SessionDeleteEndpoint.cpp
+    plugins/net/nx/endpoints/SessionRenewEndpoint.cpp
+    plugins/net/nx/endpoints/CharacterListEndpoint.cpp
+    plugins/net/nx/endpoints/CharacterGetEndpoint.cpp
+    plugins/net/nx/endpoints/CharacterSelectEndpoint.cpp
+    plugins/net/nx/endpoints/AreaListEndpoint.cpp
+    plugins/net/nx/endpoints/AreaGetEndpoint.cpp
+    plugins/net/nx/endpoints/AreaPlayersEndpoint.cpp
+    plugins/net/nx/endpoints/AreaJoinEndpoint.cpp
+    plugins/net/nx/endpoints/AreaIcEndpoint.cpp
+    plugins/net/nx/endpoints/AreaOocEndpoint.cpp
+    plugins/net/nx/endpoints/AdminSessionsEndpoint.cpp
+)
+set_property(TARGET nx_net PROPERTY CXX_STANDARD 20)
+target_include_directories(nx_net
+    PUBLIC  plugins
+    PRIVATE plugins/net/nx
+)
+target_link_libraries(nx_net PUBLIC aoengine)
+
+if(AOSDL_SCHEMAS_AVAILABLE)
+    target_sources(nx_net PRIVATE "${AONX_SCHEMAS_CPP}")
+    target_compile_definitions(nx_net PUBLIC AOSDL_HAS_GENERATED_SCHEMAS=1)
+else()
+    target_sources(nx_net PRIVATE engine/utils/GeneratedSchemasStub.cpp)
+endif()
+
+# --- kagami_server — server orchestration (protocol routing, room management) -
+
+add_library(kagami_server INTERFACE)
+target_include_directories(kagami_server INTERFACE plugins)
+target_link_libraries(kagami_server INTERFACE aoengine ao_net nx_net)
+
 # --- ao_game — AO2 game logic (courtroom, emotes, textbox, effects) ---------
 
+if(NOT AO_BUILD_SERVER_ONLY)
 add_library(ao_game STATIC
-    plugins/ao/event/ICMessageEvent.cpp
     plugins/ao/asset/AOAssetLibrary.cpp
     plugins/ao/asset/AOCharacterSheet.cpp
     plugins/ao/game/AOBlipPlayer.cpp
@@ -448,14 +629,19 @@ add_library(ao_protocol STATIC
 set_property(TARGET ao_protocol PROPERTY CXX_STANDARD 20)
 target_include_directories(ao_protocol PUBLIC plugins)
 target_link_libraries(ao_protocol PUBLIC ao_net ao_game)
+endif() # NOT AO_BUILD_SERVER_ONLY
 
 # =============================================================================
 # Applications — one per backend
 # =============================================================================
 
-if(NOT AO_BUILD_FLUTTER)
+if(NOT AO_BUILD_FLUTTER AND NOT AO_BUILD_SERVER_ONLY)
     add_subdirectory(apps/sdl)
     # add_subdirectory(apps/qt)   # future: ENABLE_THE_HORRORS
+endif()
+
+if(NOT AO_BUILD_FLUTTER)
+    add_subdirectory(apps/kagami)
 endif()
 
 # --- ao_bridge — C API for Flutter/Dart FFI (mobile) -------------------------
@@ -504,7 +690,7 @@ endif()
 # Tests
 # =============================================================================
 
-if(NOT AO_BUILD_FLUTTER)
+if(NOT AO_BUILD_FLUTTER AND NOT AO_BUILD_SERVER_ONLY)
     enable_testing()
     add_subdirectory(tests)
 endif()
@@ -527,6 +713,7 @@ if(DOXYGEN_FOUND)
 else()
     message(STATUS "Doxygen not found — the 'docs' target will not be available.")
 endif()
+
 
 # =============================================================================
 # clang-tidy

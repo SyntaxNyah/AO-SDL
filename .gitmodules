@@ -10,9 +10,6 @@
 [submodule "third-party/glm"]
 	path = third-party/glm
 	url = https://github.com/g-truc/glm
-[submodule "third-party/kissnet"]
-	path = third-party/kissnet
-	url = https://github.com/Ybalrid/kissnet
 [submodule "third-party/bit7z"]
 	path = third-party/bit7z
 	url = https://github.com/rikyoz/bit7z.git
@@ -31,3 +28,6 @@
 [submodule "third-party/ogg"]
 	path = third-party/ogg
 	url = https://github.com/xiph/ogg.git
+[submodule "third-party/nghttp2"]
+	path = third-party/nghttp2
+	url = https://github.com/nghttp2/nghttp2.git

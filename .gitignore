@@ -402,6 +402,7 @@ CMakeFiles/
 
 # Generated documentation
 docs/
+doc/aonx/index.html
 
 # IDE / OS / tool files
 .DS_Store
@@ -450,3 +451,5 @@ apps/flutter/.pub/
 
 # Flutter sub-project VS Code (use root .vscode instead)
 apps/flutter/.vscode/
+profiles/
+build-asan

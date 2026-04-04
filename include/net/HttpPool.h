@@ -4,11 +4,15 @@
 #include <condition_variable>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
+
+class Http2Connection;
 
 /// Result of an HTTP request.
 struct HttpResponse {
@@ -91,18 +95,33 @@ class HttpPool {
         HttpCallback callback;
     };
 
-    void worker_loop();
+    static constexpr int NUM_PRIORITIES = 4;
 
-    std::vector<std::thread> workers_;
-    std::atomic<bool> running_{true};
+    void worker_loop(std::stop_token st);
+    bool pop_highest(Request& out);
+
+    std::vector<std::jthread> workers_;
     std::atomic<int> pending_{0};
 
-    // Work queue sorted by priority (highest first)
-    std::deque<Request> work_queue_;
+    // Per-priority work queues — index 0 = LOW, 3 = CRITICAL.
+    // Avoids O(N) sorted insertion; enqueue is O(1), dequeue scans 4 buckets.
+    std::deque<Request> work_queues_[NUM_PRIORITIES];
     std::mutex work_mutex_;
     std::condition_variable work_cv_;
 
     // Result queue (completed, awaiting poll)
     std::deque<CompletedRequest> result_queue_;
     std::mutex result_mutex_;
+
+    // HTTP/2 connection pool: one multiplexed connection per host.
+    // Workers try h2 first; if server doesn't support it, h2_failed_hosts_
+    // prevents repeated ALPN attempts.
+    std::unordered_map<std::string, std::shared_ptr<Http2Connection>> h2_connections_;
+    std::unordered_set<std::string> h2_failed_hosts_;     // hosts that don't support h2
+    std::unordered_set<std::string> h2_eligible_hosts_;   // hosts with at least one successful h1 request
+    std::unordered_set<std::string> h2_connecting_hosts_; // hosts currently being connected (prevents races)
+    std::mutex h2_mutex_;
+
+    std::shared_ptr<Http2Connection> get_h2(const std::string& host);
+    void mark_h2_eligible(const std::string& host);
 };

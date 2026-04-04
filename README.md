@@ -14,10 +14,10 @@ See [Architecture.md](doc/Architecture.md) for a detailed overview of the design
 | **Compiler** | Xcode command line tools | GCC or Clang with C++20 | MSVC (Visual Studio 2019+) |
 | **Build tools** | CMake, Ninja | CMake, Ninja or Make | CMake, Ninja (via VS) |
 | **Graphics** | Metal (system) | `libglew-dev`, OpenGL drivers | Bundled GLEW in `third-party/` |
-| **SSL (optional)** | `brew install openssl` | `libssl-dev` | Install OpenSSL, set `OPENSSL_ROOT_DIR` |
+| **TLS** | Secure Transport (system) | `libssl-dev` | Install OpenSSL, set `OPENSSL_ROOT_DIR` |
 | **Other** | — | `libsdl2-dev` (optional, also built from source) | — |
 
-OpenSSL is optional — without it, HTTPS asset fetching is disabled and only HTTP connections will work.
+**TLS is required** on Linux and Windows (OpenSSL). On macOS/iOS, the platform's Secure Transport framework is used instead — no extra dependencies needed.
 
 ### Clone and Initialize Submodules
 
@@ -55,7 +55,9 @@ cmake --preset x64-debug
 cmake --build out/build/x64-debug
 ```
 
-Available presets: `x64-debug`, `x64-release`, `x86-debug`, `x86-release`, `linux-debug`, `macos-debug`.
+Available presets: `x64-debug`, `x64-release`, `x86-debug`, `x86-release`, `linux-debug`, `macos-debug`, `macos-release`.
+
+> **Note — LTO is disabled on MSVC.**  SDL2 sets `/Gs1048576` (1 MB stack probe threshold) to avoid C runtime dependencies in its freestanding code.  With LTCG, the linker merges translation units during a global code generation pass, and SDL's high `/Gs` value poisons the result: merged functions lose `__chkstk` stack probes even when the game's TUs were compiled with the default `/Gs4096`.  On Windows, thread stacks grow via a single guard page that must be touched sequentially — without `__chkstk`, any function with a frame larger than one page can jump past the guard into uncommitted memory, crashing with an ACCESS_VIOLATION indistinguishable from a null-pointer deref.  LTO remains enabled for GCC/Clang (macOS, Linux) where stack growth is handled by the kernel and no compiler cooperation is needed.
 
 ### Run Tests
 
@@ -79,6 +81,22 @@ Install `clang-format` via your package manager (`brew install clang-format`, `a
 
 - **`docs`** — Generate API documentation with Doxygen (requires `doxygen` installed)
 - **`run-clang-tidy`** — Run clang-tidy static analysis across the project (requires `clang-tidy` installed)
+
+### Schema Generation (Optional)
+
+The AONX REST API validates request bodies against JSON schemas generated from the OpenAPI spec (`doc/aonx/openapi.yaml`). This is **enabled by default**.
+
+**Requirements:** Python 3 + [PyYAML](https://pypi.org/project/PyYAML/) (`pip install pyyaml`).
+
+CMake runs `scripts/generate_schemas.py` at build time to produce `AonxSchemas.cpp` from the OpenAPI spec. The generated file is compiled into `nx_net` and defines `AOSDL_HAS_GENERATED_SCHEMAS=1`. Endpoints validate request bodies against the spec at runtime.
+
+To disable (e.g. if Python is unavailable):
+
+```sh
+cmake -B build -DAOSDL_GENERATE_SCHEMAS=OFF
+```
+
+Without schema generation, endpoints log an ERROR on every request but do not validate bodies. If the flag is ON (default) but Python or PyYAML is missing, CMake will fail with an error directing you to install the dependencies or pass `-DAOSDL_GENERATE_SCHEMAS=OFF`.
 
 ---
 
@@ -134,10 +152,11 @@ cd apps/flutter && flutter run -d <device-name>
 | Preset | Target | Use |
 |---|---|---|
 | `macos-debug` | macOS desktop (SDL) | Desktop development |
+| `macos-release` | macOS desktop (SDL) | Release build (-Os, LTO, strip) |
 | `ios-sim-debug` | iOS Simulator (Flutter) | Mobile development |
 | `ios-device-release` | iOS device (Flutter) | Device testing / release |
 
-The `AO_BUILD_FLUTTER` flag (set automatically by the iOS presets) excludes SDL, ImGui, and tests from the build, and includes the Flutter FFI bridge, miniaudio audio backend, and NSURLSession HTTPS shim.
+The `AO_BUILD_FLUTTER` flag (set automatically by the iOS presets) excludes SDL, ImGui, and tests from the build, and includes the Flutter FFI bridge and miniaudio audio backend.
 
 ### VS Code Integration
 
@@ -170,7 +189,6 @@ apps/flutter/
 ├── native/                  # C bridge layer
 │   ├── bridge.h / .cpp      # C API (50+ functions) wrapping engine/plugins
 │   ├── MiniaudioDevice.*    # IAudioDevice using miniaudio (CoreAudio/AAudio)
-│   ├── apple_httplib.*      # NSURLSession-based httplib replacement
 │   └── miniaudio_device_impl.mm  # miniaudio device I/O (Obj-C++)
 ├── lib/
 │   ├── bridge/              # Dart FFI bindings
@@ -190,5 +208,137 @@ apps/flutter/
 - `bridge.cpp` provides a flat C API that Dart calls via `dart:ffi` — no Dart ↔ C++ object sharing
 - The Metal renderer draws to an offscreen texture; `AoTexturePlugin` blits it to a `CVPixelBuffer` for Flutter's `Texture` widget
 - Audio uses miniaudio's CoreAudio backend (iOS) instead of SDL
-- HTTPS uses `NSURLSession` via a drop-in `httplib::Client` shim (no OpenSSL dependency on iOS)
+- TLS uses Apple's Secure Transport via the platform socket abstraction (no OpenSSL dependency on iOS)
 - Platform widgets are abstracted so the same screens work with Cupertino (iOS) or Material (Android) by swapping one file
+
+---
+
+## Kagami Server
+
+The `apps/kagami/` directory contains **Kagami**, a standalone multi-protocol game server for Attorney Online. It handles player sessions, character selection, area management, and message routing for both legacy AO2 and next-generation AONX clients simultaneously.
+
+### Building
+
+Kagami is built alongside the desktop client by default:
+
+```sh
+cmake --preset macos-debug    # or linux-debug, x64-debug
+cmake --build build --target kagami
+```
+
+The binary is output to `build/apps/kagami/kagami`.
+
+### Running
+
+```sh
+./kagami
+```
+
+On first run, Kagami creates a `kagami.json` config file next to the binary with sensible defaults. The server runs in interactive mode when launched from a terminal, providing a REPL with commands like `/status`, `/stop`, and `/help`.
+
+### Configuration
+
+All settings are stored in `kagami.json` and can be edited while the server is stopped:
+
+| Setting | Default | Description |
+|---|---|---|
+| `server_name` | `"Kagami Server"` | Display name shown to clients |
+| `server_description` | `""` | Server description |
+| `bind_address` | `"0.0.0.0"` | Listen address |
+| `http_port` | `8080` | HTTP status endpoint port |
+| `ws_port` | `8081` | WebSocket game port |
+| `max_players` | `100` | Maximum concurrent players |
+| `motd` | `""` | Message of the day |
+| `session_ttl_seconds` | `300` | REST session TTL in seconds (0 = no expiry) |
+| `cors_origin` | `"https://web.aceattorneyonline.com"` | CORS allowed origin(s) — string, `"*"`, or array of strings |
+
+### Deploying
+
+The `deploy/` directory contains everything needed to run Kagami in production.
+
+#### Quick start
+
+```sh
+cd deploy
+cp kagami.example.json kagami.json   # edit with your server settings
+KAGAMI_DOMAIN=my.server.com docker compose up -d
+```
+
+**Prerequisites:** A Linux server (arm64 or amd64) with Docker and Docker Compose. Run `deploy/bootstrap.sh` on a fresh Ubuntu instance to install them. Point your domain's DNS to the server's IP — Caddy handles TLS certificates automatically via Let's Encrypt.
+
+#### Full stack (observability)
+
+The default `docker-compose.yml` runs 5 services:
+
+| Service | Purpose | URL | RAM |
+|---|---|---|---|
+| **Caddy** | TLS + reverse proxy | `https://your.domain/` | ~18 MB |
+| **Kagami** | Game server (AO2 + AONX) | Port 27015 (WebSocket, direct) | ~20 MB |
+| **Prometheus** | Metrics collection | `https://your.domain/prometheus/` | ~100 MB |
+| **Loki** | Log aggregation | (internal, queried via Grafana) | ~80 MB |
+| **Grafana** | Dashboards + log viewer | `https://your.domain/grafana/` | ~130 MB |
+
+This requires ~350 MB of RAM for the full stack. A t4g.micro (1 GB) or equivalent is recommended.
+
+Optionally create a `.env` file with `GRAFANA_ADMIN_PASSWORD=your_password` (defaults to `kagami`). Anonymous visitors get read-only dashboard access. A 34-panel Grafana dashboard is auto-provisioned on first boot — no manual setup needed.
+
+#### Minimal stack (game server only)
+
+If you don't need observability, remove the `prometheus`, `loki`, and `grafana` services from `docker-compose.yml` and trim the `Caddyfile` to just proxy to `kagami:80`. This runs on ~40 MB total — a t4g.nano (512 MB) is more than enough.
+
+Kagami's `/metrics` endpoint still works in the minimal setup, so you can add monitoring later or scrape remotely from another server.
+
+#### Updating
+
+On pushes to `master`, CI automatically builds the Docker image and pushes it to GHCR. If you set the `DEPLOY_SSH_KEY` and `DEPLOY_HOST` secrets in your fork, CI will also deploy to your server:
+
+```sh
+cd /opt/kagami && docker compose pull kagami && docker compose up -d kagami
+```
+
+Only the `kagami` container restarts — Caddy, Prometheus, Grafana, and Loki continue running.
+
+For manual deploys (e.g., testing a branch), build and push the image locally:
+
+```sh
+docker buildx build --platform linux/arm64 \
+  -t ghcr.io/attorneyonline/kagami:latest \
+  --output type=docker,dest=/tmp/kagami.tar .
+
+scp -i your-key.pem /tmp/kagami.tar user@your.server:/tmp/
+ssh -i your-key.pem user@your.server "
+  docker load < /tmp/kagami.tar
+  cd /opt/kagami && docker compose up -d kagami
+"
+```
+
+#### Observability
+
+Kagami exposes a Prometheus-compatible `/metrics` endpoint with 33 metric families covering network I/O, sessions, areas, lock contention, memory, and per-client traffic. Logs are pushed to Loki (if configured) with Grafana-native log levels for filtered queries. See `include/metrics/` for the full metric inventory.
+
+### Architecture
+
+Kagami uses a protocol-agnostic core with pluggable protocol backends:
+
+```
+apps/kagami/              # Server application
+├── main.cpp              # Entry point, wiring, REPL
+├── ServerSettings.*      # kagami.json configuration
+└── TerminalUI.*          # Interactive terminal with log display
+
+plugins/kagami_server/    # Protocol layer (engine plugin)
+├── kagami/
+│   ├── ProtocolRouter.*  # Routes clients by WebSocket subprotocol
+│   ├── AOServer.*        # AO2 backend (#%-delimited packets)
+│   └── NXServer.*        # AONX backend (JSON messages)
+└── game/
+    ├── GameRoom.*        # Authoritative game state
+    ├── GameAction.h      # Protocol-agnostic input actions
+    ├── GameEvent.h       # Protocol-agnostic output events
+    └── ServerSession.*   # Per-player session state
+```
+
+**Key design decisions:**
+- **Multi-protocol**: A `ProtocolRouter` inspects the WebSocket subprotocol header (`ao2` or `aonx`) and routes each client to the correct backend — both protocol types can play in the same room
+- **Action/Event model**: Protocol backends parse wire formats into protocol-agnostic `GameAction`s; the `GameRoom` validates and processes them, then emits `GameEvent`s that each backend serializes back to its own wire format
+- **Transport**: WebSocket (RFC 6455) for game traffic; event-loop HTTP server for REST API and Server-Sent Events (SSE)

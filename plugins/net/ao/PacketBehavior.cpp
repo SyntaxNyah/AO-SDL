@@ -1,7 +1,6 @@
 #include "PacketTypes.h"
 
 #include "AOClient.h"
-#include "ao/event/ICMessageEvent.h"
 #include "ao/event/PlayerCountEvent.h"
 #include "ao/event/ServerInfoEvent.h"
 #include "event/AreaUpdateEvent.h"
@@ -14,6 +13,7 @@
 #include "event/EvidenceListEvent.h"
 #include "event/FeatureListEvent.h"
 #include "event/HealthBarEvent.h"
+#include "event/ICMessageEvent.h"
 #include "event/MusicChangeEvent.h"
 #include "event/MusicListEvent.h"
 #include "event/PlayerListEvent.h"
@@ -42,8 +42,7 @@ void AOPacketIDClient::handle(AOClient& cli) {
 
     cli.player_number = player_number;
 
-    EventManager::instance().get_channel<ServerInfoEvent>().publish(
-        ServerInfoEvent(server_software, server_version, player_number));
+    EventManager::instance().get_channel<ServerInfoEvent>().publish(ServerInfoEvent(software, version, player_number));
 
     AOPacketIDServer id_to_server(std::string("AO-SDL/") + ao_sdl_version(), "2.999.999");
     cli.add_message(id_to_server);

@@ -9,6 +9,8 @@
 
 #include <atomic>
 #include <deque>
+#include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <type_traits>
@@ -46,13 +48,38 @@ class EventChannel {
      * @brief Publishes an event to the back of the queue.
      *
      * Acquires the internal mutex for the duration of the call.
+     * If a notify callback is set, it is invoked after the event is enqueued
+     * (outside the lock).
      *
      * @param ev The event to enqueue (moved into the queue).
      */
     void publish(T&& ev) {
+        std::shared_ptr<std::function<void()>> cb;
+        {
+            const std::lock_guard<std::mutex> lock(event_queue_mutex);
+            event_queue.push_back(std::move(ev));
+            ++publish_count_;
+            cb = on_publish_; // shared_ptr copy is cheap (refcount bump, no allocation)
+        }
+        if (cb)
+            (*cb)();
+    }
+
+    /**
+     * @brief Set a callback invoked after each publish().
+     *
+     * The callback is invoked outside the channel's lock, so it is safe
+     * to call poller.notify() or other non-reentrant operations.
+     * Only one callback is supported; setting a new one replaces the old.
+     *
+     * @param cb Callback to invoke, or nullptr to clear.
+     */
+    void set_on_publish(std::function<void()> cb) {
         const std::lock_guard<std::mutex> lock(event_queue_mutex);
-        event_queue.push_back(std::move(ev));
-        ++publish_count_;
+        if (cb)
+            on_publish_ = std::make_shared<std::function<void()>>(std::move(cb));
+        else
+            on_publish_.reset();
     }
 
     /**
@@ -61,6 +88,18 @@ class EventChannel {
      */
     uint64_t publish_count() const {
         return publish_count_.load(std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief Returns the number of pending events in the queue.
+     *
+     * Acquires the internal mutex for the duration of the call.
+     *
+     * @return The number of queued events.
+     */
+    size_t size() {
+        const std::lock_guard<std::mutex> lock(event_queue_mutex);
+        return event_queue.size();
     }
 
     /**
@@ -93,7 +132,8 @@ class EventChannel {
     }
 
   private:
-    std::mutex event_queue_mutex;            /**< Guards all access to @c event_queue. */
-    std::deque<T> event_queue;               /**< FIFO storage for pending events. */
-    std::atomic<uint64_t> publish_count_{0}; /**< Total events published (for debug stats). */
+    std::mutex event_queue_mutex;                       /**< Guards all access to @c event_queue. */
+    std::deque<T> event_queue;                          /**< FIFO storage for pending events. */
+    std::atomic<uint64_t> publish_count_{0};            /**< Total events published (for debug stats). */
+    std::shared_ptr<std::function<void()>> on_publish_; /**< Optional callback fired after each publish(). */
 };

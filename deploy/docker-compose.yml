@@ -1,0 +1,86 @@
+services:
+  # --- Reverse proxy + TLS ---
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"       # HTTPS (TCP) — HTTP/1.1 + HTTP/2
+      - "443:443/udp"  # QUIC — HTTP/3
+    environment:
+      - KAGAMI_DOMAIN=${KAGAMI_DOMAIN:-canary.attorneyoffline.de}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - kagami
+      - grafana
+
+  # --- Game server ---
+  kagami:
+    image: ghcr.io/attorneyonline/kagami:latest
+    restart: unless-stopped
+    ports:
+      - "27015:27015"  # WebSocket (AO2) — direct, no proxy
+    volumes:
+      - ./kagami.json:/app/kagami.json
+      - kagami_logs:/logs
+    # HTTP on port 80 is internal only (Caddy proxies to it)
+
+  # --- Metrics ---
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=24h'
+      - '--storage.tsdb.retention.size=1GB'
+      - '--storage.tsdb.min-block-duration=30m'
+      - '--storage.tsdb.max-block-duration=1h'
+      - '--web.external-url=/prometheus/'
+      - '--web.route-prefix=/prometheus/'
+    depends_on:
+      - kagami
+
+  # --- Log aggregation ---
+  loki:
+    image: grafana/loki:latest
+    restart: unless-stopped
+    volumes:
+      - loki_data:/loki
+    command:
+      - '-config.expand-env=true'
+      - '-config.file=/etc/loki/local-config.yaml'
+
+  # --- Dashboards ---
+  grafana:
+    image: grafana/grafana:latest
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-kagami}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_RBAC_PERMISSION_CACHE=false
+      - GF_USERS_EDITORS_CAN_ADMIN=true
+      - GF_AUTH_BASIC_ENABLED=true
+      - GF_SERVER_ROOT_URL=https://${KAGAMI_DOMAIN:-canary.attorneyoffline.de}/grafana/
+      - GF_SERVER_SERVE_FROM_SUB_PATH=true
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+      - loki
+
+volumes:
+  caddy_data:
+  caddy_config:
+  kagami_logs:
+  prometheus_data:
+  loki_data:
+  grafana_data:
