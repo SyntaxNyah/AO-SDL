@@ -5,6 +5,10 @@
 #include "event/EventManager.h"
 #include "event/PlayerListEvent.h"
 
+#include <array>
+#include <cstdint>
+#include <optional>
+
 class PlayerListWidgetTest : public ImGuiTestFixture {
   protected:
     void SetUp() override {
@@ -87,4 +91,25 @@ TEST_F(PlayerListWidgetTest, RenderSmokeTest_WithPlayers) {
     ch.publish(PlayerListEvent(PlayerListEvent::Action::UPDATE_CHARACTER, 1, "Phoenix"));
     widget_.handle_events();
     with_frame([&] { widget_.render(); });
+}
+
+TEST_F(PlayerListWidgetTest, IconLoaderCalledOncePerCharacterAndCached) {
+    auto& ch = EventManager::instance().get_channel<PlayerListEvent>();
+    ch.publish(PlayerListEvent(PlayerListEvent::Action::ADD, 1));
+    ch.publish(PlayerListEvent(PlayerListEvent::Action::UPDATE_CHARACTER, 1, "Phoenix"));
+    widget_.handle_events();
+
+    int load_calls = 0;
+    widget_.set_icon_loader([&](const std::string& character) -> std::optional<Texture2D> {
+        ++load_calls;
+        EXPECT_EQ(character, "Phoenix");
+        std::array<uint8_t, 4> pixels{255, 255, 255, 255};
+        return Texture2D(1, 1, pixels.data(), 4);
+    });
+
+    with_frame([&] { widget_.render(); });
+    EXPECT_EQ(load_calls, 1);
+
+    with_frame([&] { widget_.render(); });
+    EXPECT_EQ(load_calls, 1);
 }

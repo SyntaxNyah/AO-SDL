@@ -48,6 +48,17 @@ CourtroomController::CourtroomController(CourtroomScreen& screen, RenderManager&
     side_select_ = std::make_unique<SideSelectWidget>(&ic_state_);
     message_options_ = std::make_unique<MessageOptionsWidget>(&ic_state_);
     music_area_ = std::make_unique<MusicAreaWidget>(&ic_state_);
+
+    player_list_.set_icon_loader([](const std::string& character) -> std::optional<Texture2D> {
+        AOAssetLibrary ao_assets(MediaManager::instance().assets());
+        auto asset = ao_assets.character_icon(character);
+        if (asset && asset->frame_count() > 0) {
+            const ImageFrame& frame = asset->frame(0);
+            return Texture2D(frame.width, frame.height, asset->frame_pixels(0), 4);
+        }
+        ao_assets.prefetch_image("characters/" + character + "/char_icon", 0);
+        return std::nullopt;
+    });
 }
 
 CourtroomController::~CourtroomController() {
