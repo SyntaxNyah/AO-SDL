@@ -50,8 +50,10 @@ void ChatWidget::render() {
             OutgoingChatEvent(std::string(m_name), std::move(msg)));
     };
 
-    if (ImGui::InputText("##ooc_msg", m_message, sizeof(m_message), ImGuiInputTextFlags_EnterReturnsTrue))
+    if (ImGui::InputText("##ooc_msg", m_message, sizeof(m_message), ImGuiInputTextFlags_EnterReturnsTrue)) {
         send();
+        ImGui::SetKeyboardFocusHere(-1);
+    }
     ImGui::SameLine();
     if (ImGui::Button("Send"))
         send();
