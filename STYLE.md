@@ -23,6 +23,8 @@ The pre-commit hook (`.githooks/pre-commit`) auto-formats staged `.cpp`, `.h`, a
 git config core.hooksPath .githooks
 ```
 
+Text files are normalized to LF by `.gitattributes` (`* text=auto eol=lf`), matching clang-format's `UseCRLF: false` and the CI formatting job. Theme INIs under `assets/themes/` are exempt and stay CRLF.
+
 ---
 
 ## Naming

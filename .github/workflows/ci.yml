@@ -18,13 +18,19 @@ jobs:
       - name: Install clang-format
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-format-19 || sudo apt-get install -y clang-format
+          # The tree is formatted with clang-format 19; 17/18 report violations
+          # on code 19 accepts (e.g. `struct pollfd pfd{};`), so pin the major
+          # version instead of silently falling back to whatever apt defaults to.
+          sudo apt-get install -y clang-format-19
+          clang-format-19 --version
       - name: Check formatting
         run: |
-          CF=$(command -v clang-format-19 || command -v clang-format)
-          find engine plugins apps/sdl apps/kagami include platform tests \
-            -name '*.cpp' -o -name '*.h' -o -name '*.mm' | \
-            xargs "$CF" --dry-run --Werror
+          CF=clang-format-19
+          # Mirrors .githooks/pre-commit: every tracked C++/ObjC++ file outside
+          # third-party/. Using git ls-files keeps vendored and generated files
+          # out of the check without a directory list that can drift.
+          git ls-files -z -- '*.cpp' '*.h' '*.mm' ':(exclude)third-party' |
+            xargs -0 -r "$CF" --dry-run --Werror
 
   # ---- Build, test, and package per OS ----
   build:
@@ -215,12 +221,39 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # ---- Deploy gate ----
+  # Secrets cannot be referenced from a job-level `if`, so probe them here and
+  # let `deploy` read the result. A repository without AWS/CloudFormation
+  # secrets (a fork, for example) skips the deploy instead of failing it.
+  deploy-gate:
+    name: Deploy gate
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    outputs:
+      enabled: ${{ steps.secrets.outputs.enabled }}
+    steps:
+      - name: Check deploy secrets
+        id: secrets
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          CF_STACK_NAME: ${{ secrets.CF_STACK_NAME }}
+        run: |
+          if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ] || \
+             [ -z "$AWS_REGION" ] || [ -z "$CF_STACK_NAME" ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Staging deploy skipped - AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION and CF_STACK_NAME are not all configured."
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
   # ---- Deploy Kagami staging via SSM ----
   deploy:
     name: Deploy (staging)
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    needs: [docker]
+    needs: [docker, deploy-gate]
+    if: needs.deploy-gate.outputs.enabled == 'true'
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -234,15 +267,21 @@ jobs:
                       "Name=instance-state-name,Values=running" \
             --query 'Reservations[0].Instances[0].InstanceId' \
             --output text)
+          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ]; then
+            echo "::error::No running instance found for the configured CloudFormation stack"
+            exit 1
+          fi
           echo "id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
           echo "Instance: $INSTANCE_ID"
 
       - name: Deploy via SSM
         run: |
+          # GHCR paths are lowercase; the Docker job pushes under this same owner.
+          IMAGE="ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/kagami:latest"
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "${{ steps.instance.outputs.id }}" \
             --document-name AWS-RunShellScript \
-            --parameters 'commands=["cd /opt/kagami && sed -i \"s|^KAGAMI_IMAGE=.*|KAGAMI_IMAGE=ghcr.io/attorneyonline/kagami:latest|\" .env && . ./.env && docker pull $KAGAMI_IMAGE && docker compose up -d --force-recreate kagami && docker image prune -af"]' \
+            --parameters "commands=[\"cd /opt/kagami && sed -i \\\"s|^KAGAMI_IMAGE=.*|KAGAMI_IMAGE=$IMAGE|\\\" .env && . ./.env && docker pull \$KAGAMI_IMAGE && docker compose up -d --force-recreate kagami && docker image prune -af\"]" \
             --query 'Command.CommandId' \
             --output text)
           echo "SSM Command: $COMMAND_ID"

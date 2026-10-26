@@ -1,0 +1,7 @@
+# Keep every checkout byte-identical to the repository. The clang-format CI job
+# runs with UseCRLF: false, so a CRLF working tree would fail it; normalizing on
+# add also keeps Windows commits from rewriting whole files.
+* text=auto eol=lf
+
+# Theme INIs are checked in with CRLF and consumed verbatim as asset data.
+assets/themes/**/*.ini -text

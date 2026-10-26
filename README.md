@@ -5,6 +5,10 @@ AO SDL is a reimplementation of AO2 using SDL2, OpenGL, and imgui. Focus is on c
 
 See [Architecture.md](doc/Architecture.md) for a detailed overview of the design principles, component architecture, and threading model. See [STYLE.md](STYLE.md) for coding conventions and naming rules.
 
+## Documentation
+
+The API reference and protocol documentation are built by the `Docs` workflow. They are published to GitHub Pages when the repository has Pages enabled with source "GitHub Actions" (Settings → Pages); without it the workflow still builds them, it just doesn't deploy.
+
 ## Building
 
 ### Prerequisites
@@ -298,7 +302,7 @@ Kagami's `/metrics` endpoint still works in the minimal setup, so you can add mo
 
 #### Updating
 
-On pushes to `master`, CI automatically builds the Docker image and pushes it to GHCR. If you set the `DEPLOY_SSH_KEY` and `DEPLOY_HOST` secrets in your fork, CI will also deploy to your server:
+On pushes to `master`, CI builds the Kagami image and pushes it to GHCR. If the repository defines the `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, and `CF_STACK_NAME` secrets, CI also deploys the new image to the matching EC2 instance over SSM. Without them the deploy job is skipped rather than failed.
 
 ```sh
 cd /opt/kagami && docker compose pull kagami && docker compose up -d kagami
